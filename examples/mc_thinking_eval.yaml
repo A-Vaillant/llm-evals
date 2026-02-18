@@ -1,0 +1,85 @@
+# Multiple-choice evaluation: thinking vs. no-thinking
+#
+# Probes the model's answer-token probability distribution using the
+# forced-prefix pattern:
+#
+#   User:      <question + choices>
+#   Assistant: <answer>          ← prefill; model continues from here
+#   Model emits exactly 1 token (the letter). top_logprobs captures the
+#   full distribution over answer choices at that position.
+#
+# NOTE: assistant prefill is supported by Anthropic models via OpenRouter.
+# It is NOT supported for OpenAI-hosted models.
+#
+# Thinking is toggled per-pipeline via inference.thinking. Budget is set
+# low here for iteration speed; raise it for serious evaluations.
+
+experiment:
+  name: "mc-thinking-eval"
+  mode: "timestamped"
+  description: "Does extended thinking improve MC accuracy and calibration?"
+  tags: ["mc", "thinking", "logprobs", "calibration"]
+
+prompts:
+  mc_probe:
+    system: "You are a precise reasoning assistant. Always respond with exactly one letter."
+    user: |
+      {question}
+
+      A) {choice_a}
+      B) {choice_b}
+      C) {choice_c}
+      D) {choice_d}
+
+      Respond with just the letter of the correct answer.
+    prefill: "<answer>"
+
+inference_defaults:
+  temperature: 1      # keep at 1 with thinking; temperature != 1 unsupported for thinking models
+  max_tokens: 1       # capture exactly the answer token
+  logprobs: true
+  top_logprobs: 20    # capture wide distribution; answer letters must appear in top-20
+
+scorers:
+  mc_logprob:
+    strategy: "logprob_distribution"
+    params:
+      tokens_of_interest: ["A", "B", "C", "D"]
+      field: "answer"
+
+  mc_exact:
+    strategy: "exact_match"
+    params:
+      field: "answer"
+      normalize: true
+
+pipelines:
+  # ── No thinking ──────────────────────────────────────────────────────────
+  - name: "claude-no-thinking"
+    model: "anthropic/claude-3-7-sonnet"
+    data: "mc_questions.jsonl"
+    prompt: "mc_probe"
+    scorer: "mc_logprob"
+    # No thinking key → standard inference
+
+  # ── With thinking (low budget for iteration) ──────────────────────────────
+  - name: "claude-thinking-low"
+    model: "anthropic/claude-3-7-sonnet"
+    data: "mc_questions.jsonl"
+    prompt: "mc_probe"
+    scorer: "mc_logprob"
+    inference:
+      thinking:
+        type: "enabled"
+        budget_tokens: 1024
+
+  # ── With thinking (high budget) ───────────────────────────────────────────
+  - name: "claude-thinking-high"
+    model: "anthropic/claude-3-7-sonnet"
+    data: "mc_questions.jsonl"
+    prompt: "mc_probe"
+    scorer: "mc_logprob"
+    inference:
+      thinking:
+        type: "enabled"
+        budget_tokens: 8000

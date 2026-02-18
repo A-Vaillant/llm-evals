@@ -8,13 +8,20 @@ dependencies = [
     "pyyaml>=6.0",
     "openai>=1.0",
     "pandas>=2.0",
+    "python-dotenv>=1.0",
 ]
+
+[project.scripts]
+llm-evals = "llm_evals.cli:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+
+[tool.uv]
+package = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
