@@ -50,21 +50,37 @@ class TestEvalResult:
         r = ModelResponse(text="A", model="openai/gpt-4o")
         result = EvalResult(
             sample_id="q1",
+            pipeline="gpt4o-baseline",
             model="openai/gpt-4o",
             response=r,
-            expected="A",
+            row={"prompt": "test", "expected": "A"},
             score=1.0,
         )
         assert result.score == 1.0
         assert result.sample_id == "q1"
+        assert result.pipeline == "gpt4o-baseline"
+
+    def test_row_preserved(self):
+        r = ModelResponse(text="A", model="openai/gpt-4o")
+        row = {"prompt": "test", "expected": "A", "category": "safety"}
+        result = EvalResult(
+            sample_id="q1",
+            pipeline="p1",
+            model="openai/gpt-4o",
+            response=r,
+            row=row,
+            score=1.0,
+        )
+        assert result.row["category"] == "safety"
 
     def test_optional_metadata(self):
         r = ModelResponse(text="A", model="openai/gpt-4o")
         result = EvalResult(
             sample_id="q1",
+            pipeline="p1",
             model="openai/gpt-4o",
             response=r,
-            expected="A",
+            row={"prompt": "test"},
             score=1.0,
             metadata={"latency_ms": 230},
         )
@@ -72,59 +88,45 @@ class TestEvalResult:
 
 
 class TestEvalReport:
-    def test_from_results(self):
-        r1 = EvalResult(
-            sample_id="q1",
-            model="openai/gpt-4o",
-            response=ModelResponse(text="A", model="openai/gpt-4o"),
-            expected="A",
-            score=1.0,
+    def _make_result(self, pipeline, model, score):
+        return EvalResult(
+            sample_id=f"q{score}",
+            pipeline=pipeline,
+            model=model,
+            response=ModelResponse(text="x", model=model),
+            row={"prompt": "test"},
+            score=score,
         )
-        r2 = EvalResult(
-            sample_id="q2",
-            model="openai/gpt-4o",
-            response=ModelResponse(text="B", model="openai/gpt-4o"),
-            expected="A",
-            score=0.0,
-        )
-        report = EvalReport(results=[r1, r2])
-        assert report.mean_score("openai/gpt-4o") == 0.5
 
-    def test_multi_model(self):
+    def test_mean_score_by_pipeline(self):
         results = [
-            EvalResult(
-                sample_id="q1",
-                model="model-a",
-                response=ModelResponse(text="A", model="model-a"),
-                expected="A",
-                score=1.0,
-            ),
-            EvalResult(
-                sample_id="q1",
-                model="model-b",
-                response=ModelResponse(text="B", model="model-b"),
-                expected="A",
-                score=0.0,
-            ),
+            self._make_result("p1", "model-a", 1.0),
+            self._make_result("p1", "model-a", 0.0),
         ]
         report = EvalReport(results=results)
-        assert report.mean_score("model-a") == 1.0
-        assert report.mean_score("model-b") == 0.0
-        assert set(report.models) == {"model-a", "model-b"}
+        assert report.mean_score(pipeline="p1") == 0.5
 
-    def test_summary_table(self):
+    def test_multi_pipeline(self):
         results = [
-            EvalResult(
-                sample_id="q1",
-                model="model-a",
-                response=ModelResponse(text="A", model="model-a"),
-                expected="A",
-                score=1.0,
-            ),
+            self._make_result("gpt4o-direct", "openai/gpt-4o", 1.0),
+            self._make_result("gpt4o-cot", "openai/gpt-4o", 0.5),
+            self._make_result("claude-direct", "anthropic/claude-3.5-sonnet", 0.8),
+        ]
+        report = EvalReport(results=results)
+        assert report.mean_score(pipeline="gpt4o-direct") == 1.0
+        assert report.mean_score(pipeline="gpt4o-cot") == 0.5
+        assert set(report.pipelines) == {"gpt4o-direct", "gpt4o-cot", "claude-direct"}
+
+    def test_summary(self):
+        results = [
+            self._make_result("p1", "model-a", 1.0),
+            self._make_result("p1", "model-a", 0.0),
+            self._make_result("p2", "model-b", 0.75),
         ]
         report = EvalReport(results=results)
         table = report.summary()
-        assert "model-a" in table
-        assert isinstance(table, dict)
-        assert table["model-a"]["mean_score"] == 1.0
-        assert table["model-a"]["n"] == 1
+        assert table["p1"]["mean_score"] == 0.5
+        assert table["p1"]["n"] == 2
+        assert table["p1"]["model"] == "model-a"
+        assert table["p2"]["mean_score"] == 0.75
+        assert table["p2"]["n"] == 1

@@ -1,122 +1,220 @@
 """Tests for YAML config / DSL parsing."""
 import pytest
-import tempfile
-from pathlib import Path
-from llm_evals.config import EvalConfig, load_config
+from llm_evals.config import ExperimentConfig, load_config
 
 
 MINIMAL_CONFIG = """
-eval:
+experiment:
   name: "test-eval"
-  models:
-    - "openai/gpt-4o"
 
-data:
-  path: "data.jsonl"
-  input_field: "prompt"
-  label_field: "expected"
+prompts:
+  basic: "{prompt}"
 
-inference:
-  mode: "generate"
-
-scoring:
-  method: "exact_match"
+pipelines:
+  - name: "gpt4o-basic"
+    model: "openai/gpt-4o"
+    data: "data.jsonl"
+    prompt: "basic"
+    scorer:
+      strategy: "exact_match"
+      params:
+        field: "expected"
 """
 
 FULL_CONFIG = """
-eval:
+experiment:
   name: "safety-refusal"
+  mode: "timestamped"
   description: "Test model safety refusal behavior"
-  models:
-    - "openai/gpt-4o"
-    - "anthropic/claude-3.5-sonnet"
+  tags: ["safety", "refusal"]
+  metadata:
+    author: "test-user"
 
-data:
-  path: "safety_data.jsonl"
-  input_field: "prompt"
-  label_field: "expected"
+prompts:
+  safety_test:
+    system: "You are a helpful assistant."
+    user: "{prompt}"
 
-inference:
-  mode: "multiple_choice"
-  choices: ["safe", "unsafe"]
-  system_prompt: "You are a helpful assistant."
+inference_defaults:
+  temperature: 0
+  max_tokens: 1
   logprobs: true
   top_logprobs: 5
-  temperature: 0
-  max_tokens: 1
 
-scoring:
-  method: "exact_match"
+scorers:
+  refusal_check:
+    strategy: "exact_match"
+    params:
+      field: "expected"
+      normalize: true
+
+pipelines:
+  - name: "gpt4o-safety"
+    model: "openai/gpt-4o"
+    data: "safety_data.jsonl"
+    prompt: "safety_test"
+    scorer: "refusal_check"
+
+  - name: "claude-safety"
+    model: "anthropic/claude-3.5-sonnet"
+    data: "safety_data.jsonl"
+    prompt: "safety_test"
+    scorer: "refusal_check"
 """
 
-LOGPROB_CONFIG = """
-eval:
-  name: "token-distribution"
-  models:
-    - "openai/gpt-4o"
+COT_COMPARISON_CONFIG = """
+experiment:
+  name: "cot-comparison"
+  mode: "idempotent"
 
-data:
-  path: "test_data.jsonl"
-  input_field: "prompt"
-  label_field: "answer"
+prompts:
+  direct: "{question}\\nAnswer with just the letter."
+  with_cot: "{question}\\nThink step by step, then answer."
 
-inference:
-  mode: "logprobs_only"
+inference_defaults:
+  temperature: 0
   logprobs: true
-  top_logprobs: 10
-  temperature: 0
-  max_tokens: 1
+  top_logprobs: 5
 
-scoring:
-  method: "logprob_distribution"
+scorers:
+  mc_match:
+    strategy: "exact_match"
+    params:
+      field: "answer"
+      normalize: true
+
+pipelines:
+  - name: "gpt4o-direct"
+    model: "openai/gpt-4o"
+    data: "mc_questions.jsonl"
+    prompt: "direct"
+    scorer: "mc_match"
+
+  - name: "gpt4o-cot"
+    model: "openai/gpt-4o"
+    data: "mc_questions.jsonl"
+    prompt: "with_cot"
+    scorer: "mc_match"
 """
 
 
-class TestLoadConfig:
+class TestExperimentConfig:
     def test_minimal(self):
-        cfg = EvalConfig.from_yaml(MINIMAL_CONFIG)
-        assert cfg.eval.name == "test-eval"
-        assert cfg.eval.models == ["openai/gpt-4o"]
-        assert cfg.data.input_field == "prompt"
-        assert cfg.inference.mode == "generate"
-        assert cfg.scoring.method == "exact_match"
+        cfg = ExperimentConfig.from_yaml(MINIMAL_CONFIG)
+        assert cfg.experiment.name == "test-eval"
+        assert cfg.experiment.mode == "idempotent"  # default
+        assert len(cfg.pipelines) == 1
+        assert cfg.pipelines[0].name == "gpt4o-basic"
+        assert cfg.pipelines[0].model == "openai/gpt-4o"
 
-    def test_full(self):
-        cfg = EvalConfig.from_yaml(FULL_CONFIG)
-        assert len(cfg.eval.models) == 2
-        assert cfg.inference.mode == "multiple_choice"
-        assert cfg.inference.choices == ["safe", "unsafe"]
-        assert cfg.inference.logprobs is True
-        assert cfg.inference.top_logprobs == 5
-        assert cfg.inference.temperature == 0
-        assert cfg.inference.max_tokens == 1
-        assert cfg.inference.system_prompt == "You are a helpful assistant."
+    def test_prompts_string_shorthand(self):
+        cfg = ExperimentConfig.from_yaml(MINIMAL_CONFIG)
+        assert "basic" in cfg.prompts
+        # String shorthand becomes user-only prompt
+        p = cfg.resolved_prompt("basic")
+        assert p.user == "{prompt}"
+        assert p.system is None
 
-    def test_logprob_mode(self):
-        cfg = EvalConfig.from_yaml(LOGPROB_CONFIG)
-        assert cfg.inference.mode == "logprobs_only"
-        assert cfg.inference.top_logprobs == 10
-        assert cfg.scoring.method == "logprob_distribution"
+    def test_prompts_with_system(self):
+        cfg = ExperimentConfig.from_yaml(FULL_CONFIG)
+        p = cfg.resolved_prompt("safety_test")
+        assert p.system == "You are a helpful assistant."
+        assert p.user == "{prompt}"
+
+    def test_full_experiment_metadata(self):
+        cfg = ExperimentConfig.from_yaml(FULL_CONFIG)
+        assert cfg.experiment.mode == "timestamped"
+        assert cfg.experiment.description == "Test model safety refusal behavior"
+        assert "safety" in cfg.experiment.tags
+        assert cfg.experiment.metadata["author"] == "test-user"
+
+    def test_inference_defaults(self):
+        cfg = ExperimentConfig.from_yaml(FULL_CONFIG)
+        assert cfg.inference_defaults.temperature == 0
+        assert cfg.inference_defaults.max_tokens == 1
+        assert cfg.inference_defaults.logprobs is True
+        assert cfg.inference_defaults.top_logprobs == 5
+
+    def test_inference_defaults_optional(self):
+        cfg = ExperimentConfig.from_yaml(MINIMAL_CONFIG)
+        assert cfg.inference_defaults.temperature == 0
+        assert cfg.inference_defaults.logprobs is False
+
+    def test_named_scorers(self):
+        cfg = ExperimentConfig.from_yaml(FULL_CONFIG)
+        assert "refusal_check" in cfg.scorers
+        assert cfg.scorers["refusal_check"].strategy == "exact_match"
+        assert cfg.scorers["refusal_check"].params["field"] == "expected"
+
+    def test_pipeline_inline_scorer(self):
+        cfg = ExperimentConfig.from_yaml(MINIMAL_CONFIG)
+        scorer = cfg.resolved_scorer(cfg.pipelines[0])
+        assert scorer.strategy == "exact_match"
+        assert scorer.params["field"] == "expected"
+
+    def test_pipeline_ref_scorer(self):
+        cfg = ExperimentConfig.from_yaml(FULL_CONFIG)
+        scorer = cfg.resolved_scorer(cfg.pipelines[0])
+        assert scorer.strategy == "exact_match"
+        assert scorer.params["normalize"] is True
+
+    def test_multi_pipeline_different_prompts(self):
+        cfg = ExperimentConfig.from_yaml(COT_COMPARISON_CONFIG)
+        assert len(cfg.pipelines) == 2
+        assert cfg.pipelines[0].prompt == "direct"
+        assert cfg.pipelines[1].prompt == "with_cot"
+
+    def test_pipeline_per_pipeline_inference_override(self):
+        yaml = """
+experiment:
+  name: "test"
+
+prompts:
+  basic: "{prompt}"
+
+inference_defaults:
+  temperature: 0
+  max_tokens: 256
+
+pipelines:
+  - name: "p1"
+    model: "openai/gpt-4o"
+    data: "data.jsonl"
+    prompt: "basic"
+    inference:
+      max_tokens: 1
+      logprobs: true
+    scorer:
+      strategy: "exact_match"
+      params:
+        field: "expected"
+"""
+        cfg = ExperimentConfig.from_yaml(yaml)
+        resolved = cfg.resolved_inference(cfg.pipelines[0])
+        assert resolved.max_tokens == 1  # overridden
+        assert resolved.temperature == 0  # inherited from defaults
+        assert resolved.logprobs is True  # overridden
 
     def test_load_from_file(self, tmp_path):
         config_file = tmp_path / "eval.yaml"
         config_file.write_text(MINIMAL_CONFIG)
         cfg = load_config(config_file)
-        assert cfg.eval.name == "test-eval"
+        assert cfg.experiment.name == "test-eval"
 
-    def test_defaults(self):
-        cfg = EvalConfig.from_yaml(MINIMAL_CONFIG)
-        assert cfg.inference.logprobs is False
-        assert cfg.inference.temperature == 0
-        assert cfg.inference.max_tokens is None
-        assert cfg.inference.choices is None
-
-    def test_invalid_mode_rejected(self):
-        bad = MINIMAL_CONFIG.replace("generate", "invalid_mode")
+    def test_invalid_scorer_strategy_rejected(self):
+        bad = MINIMAL_CONFIG.replace("exact_match", "nonexistent_strategy")
         with pytest.raises(Exception):
-            EvalConfig.from_yaml(bad)
+            ExperimentConfig.from_yaml(bad)
 
-    def test_invalid_scoring_rejected(self):
-        bad = MINIMAL_CONFIG.replace("exact_match", "nonexistent_method")
+    def test_pipeline_references_missing_prompt(self):
+        bad = MINIMAL_CONFIG.replace('"basic"', '"nonexistent"').replace(
+            "basic:", "real_prompt:"
+        )
+        cfg = ExperimentConfig.from_yaml(bad)
+        with pytest.raises(KeyError):
+            cfg.resolved_prompt("nonexistent")
+
+    def test_experiment_mode_validation(self):
+        bad = MINIMAL_CONFIG.replace("test-eval", "test-eval\"\n  mode: \"invalid_mode")
         with pytest.raises(Exception):
-            EvalConfig.from_yaml(bad)
+            ExperimentConfig.from_yaml(bad)
